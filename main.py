@@ -2,7 +2,7 @@ import heapq
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Optional, Sequence
 
 import pygame
 
@@ -13,30 +13,48 @@ CEILING_COLOR = (30, 30, 40)
 FLOOR_COLOR = (40, 30, 20)
 
 MAP_LAYOUT = [
-    "111111111111111111111",
-    "100000000000000000001",
-    "101111101111111011101",
-    "101000101000001010001",
-    "101010101011101011101",
-    "101010001010001000101",
-    "101011111010111110101",
-    "101000001010000010101",
-    "101111101011111010101",
-    "101000101000001010101",
-    "101010101111101011101",
-    "101010001000101000101",
-    "101011111010101110101",
-    "101000000010100010001",
-    "101111111110111011101",
-    "101000000000001010001",
-    "101011111111101011101",
-    "100010000000001000001",
-    "111111111111111111111",
+    "1111111111111111111111111",
+    "100000000000A000000000001",
+    "1011111111110111111111101",
+    "1010000000010100000000101",
+    "1010111111010101111110101",
+    "1010100011010101000010101",
+    "1010101111010101011100101",
+    "1010101000010101000100101",
+    "10101B1011110101110100101",
+    "1010101010000100010100101",
+    "1010111010111111010111101",
+    "101000001010A001010000101",
+    "1011111010101111011110101",
+    "1000001010101000010000101",
+    "1111101010111011110110101",
+    "1000101010000010000100101",
+    "1011101011111011111100101",
+    "1010001000001010000000101",
+    "1010111111101010111111101",
+    "10100000000010100000B0001",
+    "1011111111111011111111101",
+    "1000000000000000000000001",
+    "1111111111111111111111111",
 ]
 
 WORLD_MAP = [list(row) for row in MAP_LAYOUT]
 MAP_WIDTH = len(WORLD_MAP[0])
 MAP_HEIGHT = len(WORLD_MAP)
+TELEPORTS: dict[str, list[tuple[int, int]]] = {}
+for y, row in enumerate(WORLD_MAP):
+    for x, tile in enumerate(row):
+        if tile.isalpha():
+            TELEPORTS.setdefault(tile, []).append((x, y))
+TELEPORT_COLOR_POOL = [
+    (245, 130, 255),
+    (130, 230, 255),
+    (255, 200, 120),
+    (150, 255, 200),
+]
+TELEPORT_COLORS: dict[str, tuple[int, int, int]] = {}
+for idx, symbol in enumerate(sorted(TELEPORTS)):
+    TELEPORT_COLORS[symbol] = TELEPORT_COLOR_POOL[idx % len(TELEPORT_COLOR_POOL)]
 MONSTER_SPAWNS = [
     (15.5, 9.5),
 ]
@@ -59,6 +77,7 @@ class Player:
     dir_y: float
     plane_x: float
     plane_y: float
+    last_teleport: Optional[str] = None
 
 
 @dataclass
@@ -187,11 +206,41 @@ def load_pellet_sprite(size: int = 26) -> pygame.Surface:
     return surf
 
 
+def make_teleporter_sprite(color: tuple[int, int, int], width: int = 48, height: int = 160) -> pygame.Surface:
+    surf = pygame.Surface((width, height), pygame.SRCALPHA)
+    base_rect = pygame.Rect(width // 4, height - height // 5, width // 2, height // 5)
+    pygame.draw.ellipse(surf, (30, 20, 40, 200), base_rect.inflate(10, 20))
+
+    body_rect = pygame.Rect(width // 3, height // 5, width // 3, height * 3 // 5)
+    gradient_steps = body_rect.height
+    for i in range(gradient_steps):
+        t = i / max(1, gradient_steps - 1)
+        glow = int(80 + 120 * (1 - t))
+        body_color = (
+            min(255, color[0] + glow // 3),
+            min(255, color[1] + glow // 2),
+            min(255, color[2] + glow),
+        )
+        pygame.draw.rect(
+            surf,
+            body_color + (220,),
+            pygame.Rect(body_rect.x, body_rect.y + i, body_rect.width, 1),
+        )
+
+    core_rect = body_rect.inflate(-body_rect.width // 3, -body_rect.width // 3)
+    pygame.draw.rect(surf, (255, 255, 255, 240), core_rect, border_radius=8)
+
+    cap_rect = pygame.Rect(body_rect.x - 6, body_rect.y - 20, body_rect.width + 12, 24)
+    pygame.draw.ellipse(surf, color + (220,), cap_rect)
+
+    return surf
+
+
 def is_blocking(x: float, y: float) -> bool:
     if x < 0 or y < 0 or x >= MAP_WIDTH or y >= MAP_HEIGHT:
         return True
     tile = WORLD_MAP[int(y)][int(x)]
-    return tile != "0"
+    return tile != "0" and not tile.isalpha()
 
 
 def move_entity(x: float, y: float, move_x: float, move_y: float) -> tuple[float, float]:
@@ -208,10 +257,35 @@ def move_player(player: Player, move_x: float, move_y: float) -> None:
     player.x, player.y = move_entity(player.x, player.y, move_x, move_y)
 
 
+def apply_teleport(player: Player) -> None:
+    tile_x = int(player.x)
+    tile_y = int(player.y)
+    if tile_x < 0 or tile_y < 0 or tile_x >= MAP_WIDTH or tile_y >= MAP_HEIGHT:
+        player.last_teleport = None
+        return
+    tile = WORLD_MAP[tile_y][tile_x]
+    if tile.isalpha():
+        if player.last_teleport == tile:
+            return
+        destinations = TELEPORTS.get(tile, [])
+        if len(destinations) < 2:
+            return
+        current = (tile_x, tile_y)
+        for dest in destinations:
+            if dest != current:
+                player.x = dest[0] + 0.5
+                player.y = dest[1] + 0.5
+                player.last_teleport = tile
+                return
+    else:
+        player.last_teleport = None
+
+
 def grid_blocked(tile_x: int, tile_y: int) -> bool:
     if tile_x < 0 or tile_y < 0 or tile_x >= MAP_WIDTH or tile_y >= MAP_HEIGHT:
         return True
-    return WORLD_MAP[tile_y][tile_x] != "0"
+    tile = WORLD_MAP[tile_y][tile_x]
+    return tile != "0" and not tile.isalpha()
 
 
 def astar_path(start: tuple[int, int], goal: tuple[int, int]) -> list[tuple[int, int]]:
@@ -344,10 +418,17 @@ def draw_minimap(screen: pygame.Surface, player: Player, monsters: list[Monster]
     for y in range(MAP_HEIGHT):
         for x in range(MAP_WIDTH):
             tile = WORLD_MAP[y][x]
-            if tile != "0":
+            if tile != "0" and not tile.isalpha():
                 color = WALL_COLORS.get(tile, (150, 150, 150))
                 rect = pygame.Rect(x * scale, y * scale, scale, scale)
                 pygame.draw.rect(mini_surface, color, rect)
+
+    for symbol, positions in TELEPORTS.items():
+        color = TELEPORT_COLORS.get(symbol, (230, 220, 120))
+        for tx, ty in positions:
+            cx = int((tx + 0.5) * scale)
+            cy = int((ty + 0.5) * scale)
+            pygame.draw.rect(mini_surface, color, pygame.Rect(cx - 3, cy - 3, 6, 6))
 
     px = int(player.x * scale)
     py = int(player.y * scale)
@@ -421,9 +502,11 @@ def cast_rays(screen: pygame.Surface, player: Player) -> list[float]:
             if map_x < 0 or map_x >= MAP_WIDTH or map_y < 0 or map_y >= MAP_HEIGHT:
                 hit = True
                 tile = "1"
-            elif WORLD_MAP[map_y][map_x] != "0":
-                tile = WORLD_MAP[map_y][map_x]
-                hit = True
+            else:
+                tile_char = WORLD_MAP[map_y][map_x]
+                if tile_char != "0" and not tile_char.isalpha():
+                    tile = tile_char
+                    hit = True
 
         if not hit:
             continue
@@ -543,6 +626,53 @@ def draw_collectibles(
                 screen.blit(scaled_sprite, (stripe, draw_start_y), source_rect)
 
 
+def draw_teleporters(
+    screen: pygame.Surface,
+    player: Player,
+    depth_buffer: list[float],
+    sprites: dict[str, pygame.Surface],
+) -> None:
+    det = player.plane_x * player.dir_y - player.dir_x * player.plane_y
+    if det == 0 or not TELEPORTS:
+        return
+    inv_det = 1.0 / det
+    for symbol, positions in TELEPORTS.items():
+        sprite_base = sprites.get(symbol)
+        if sprite_base is None:
+            continue
+        base_width, base_height = sprite_base.get_size()
+        for tile_x, tile_y in positions:
+            sprite_x = (tile_x + 0.5) - player.x
+            sprite_y = (tile_y + 0.5) - player.y
+            transform_x = inv_det * (player.dir_y * sprite_x - player.dir_x * sprite_y)
+            transform_y = inv_det * (-player.plane_y * sprite_x + player.plane_x * sprite_y)
+            if transform_y <= 0:
+                continue
+
+            sprite_screen_x = int((SCREEN_WIDTH / 2) * (1 + transform_x / transform_y))
+            sprite_height = max(1, abs(int((SCREEN_HEIGHT / transform_y) * 0.9)))
+            sprite_width = max(1, int(sprite_height * (base_width / base_height)))
+            draw_start_y = max(-sprite_height // 2 + SCREEN_HEIGHT // 2, 0)
+            draw_end_y = min(sprite_height // 2 + SCREEN_HEIGHT // 2, SCREEN_HEIGHT - 1)
+            draw_start_x = max(-sprite_width // 2 + sprite_screen_x, 0)
+            draw_end_x = min(sprite_width // 2 + sprite_screen_x, SCREEN_WIDTH - 1)
+
+            if draw_start_x >= draw_end_x or draw_start_y >= draw_end_y:
+                continue
+
+            scaled_sprite = pygame.transform.smoothscale(sprite_base, (sprite_width, sprite_height))
+            sprite_left = -sprite_width // 2 + sprite_screen_x
+            for stripe in range(draw_start_x, draw_end_x):
+                tex_x = stripe - sprite_left
+                if (
+                    0 <= stripe < SCREEN_WIDTH
+                    and 0 <= tex_x < sprite_width
+                    and depth_buffer[stripe] > transform_y
+                ):
+                    source_rect = pygame.Rect(tex_x, 0, 1, sprite_height)
+                    screen.blit(scaled_sprite, (stripe, draw_start_y), source_rect)
+
+
 def draw_danger_overlay(screen: pygame.Surface, distance: float) -> None:
     max_distance = 6.0
     if distance >= max_distance:
@@ -561,6 +691,10 @@ def main() -> None:
     font = pygame.font.SysFont("Menlo", 16)
     monster_frames = load_monster_frames()
     pellet_sprite = load_pellet_sprite()
+    teleporter_sprites = {
+        symbol: make_teleporter_sprite(color)
+        for symbol, color in TELEPORT_COLORS.items()
+    }
 
     def reset_state() -> tuple[Player, list[Monster], list[Pellet], int, int, bool, bool]:
         player_obj = spawn_player()
@@ -599,6 +733,7 @@ def main() -> None:
             if keys[pygame.K_d]:
                 rotate_player(player, -rot_speed)
 
+            apply_teleport(player)
             update_monsters(monsters, player, delta_time)
             if player_is_dead(player, monsters):
                 alive = False
@@ -617,6 +752,7 @@ def main() -> None:
 
         depth_buffer = cast_rays(screen, player)
         draw_collectibles(screen, player, pellets, depth_buffer, pellet_sprite)
+        draw_teleporters(screen, player, depth_buffer, teleporter_sprites)
         draw_monsters(screen, player, monsters, depth_buffer, monster_frames)
         draw_minimap(screen, player, monsters, pellets)
         if alive and not won:
