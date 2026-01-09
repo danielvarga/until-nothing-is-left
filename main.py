@@ -11,6 +11,10 @@ SCREEN_WIDTH = 960
 SCREEN_HEIGHT = 600
 CEILING_COLOR = (30, 30, 40)
 FLOOR_COLOR = (40, 30, 20)
+TEXTURE_SIZE = 64
+RUN_DURATION = 3.0
+RUN_COOLDOWN = 5.0
+RUN_SPEED_MULT = 1.6
 
 MAP_LAYOUT = [
     "1111111111111111111111111",
@@ -19,9 +23,9 @@ MAP_LAYOUT = [
     "1010000000010100000000101",
     "1010110111010101111110101",
     "1010100001010101000010101",
-    "1010001111010101010100101",
+    "101B001111010101010100101",
     "1010100000010101000100101",
-    "10001B1011010101110100001",
+    "1000101011010101110100001",
     "1010001010000100010100101",
     "1010010000111111010101101",
     "101000001010A001010000101",
@@ -30,9 +34,9 @@ MAP_LAYOUT = [
     "1111000000110011010110101",
     "1000001000000000000100101",
     "1011000011111001111100101",
-    "1010000000001010000000101",
+    "101000000000101000000B101",
     "1010110101101000011111101",
-    "10100000000000000000B0001",
+    "1010000000000000000000001",
     "1011011101010001111111101",
     "1000000000000000000000001",
     "1111111111111111111111111",
@@ -122,11 +126,11 @@ def load_monster_frames(frame_count: int = 4) -> list[pygame.Surface]:
         phase = idx / frame_count
         surf = pygame.Surface((width, height), pygame.SRCALPHA)
 
-        body_color = (120, 5, 5)
-        chest_color = (200, 60, 40)
-        outline_color = (30, 0, 0)
-        horn_color = (240, 240, 240)
-        eye_color = (255, 255, 80)
+        body_color = (90, 40, 140)
+        chest_color = (190, 120, 230)
+        outline_color = (25, 5, 40)
+        horn_color = (240, 240, 255)
+        eye_color = (70, 255, 220)
 
         # shadow halo for depth
         pygame.draw.ellipse(surf, (10, 0, 0, 120), pygame.Rect(8, height - 18, width - 16, 12))
@@ -236,6 +240,64 @@ def make_teleporter_sprite(color: tuple[int, int, int], width: int = 48, height:
     return surf
 
 
+def make_flesh_texture(base_color: tuple[int, int, int], variation: int = 40) -> pygame.Surface:
+    surf = pygame.Surface((TEXTURE_SIZE, TEXTURE_SIZE)).convert()
+    surf.fill(base_color)
+    rng = random.Random(sum(base_color) * 17)
+
+    # Layer blotches
+    for _ in range(180):
+        blotch_radius = rng.randint(6, 14)
+        cx = rng.randint(0, TEXTURE_SIZE)
+        cy = rng.randint(0, TEXTURE_SIZE)
+        color = tuple(
+            max(0, min(255, base_color[i] + rng.randint(-variation, variation)))
+            for i in range(3)
+        )
+        alpha = rng.randint(40, 110)
+        ellipse = pygame.Surface((blotch_radius * 2, blotch_radius * 2), pygame.SRCALPHA)
+        pygame.draw.ellipse(
+            ellipse,
+            color + (alpha,),
+            pygame.Rect(0, 0, blotch_radius * 2, blotch_radius * 2),
+        )
+        surf.blit(ellipse, (cx - blotch_radius, cy - blotch_radius), special_flags=pygame.BLEND_RGBA_ADD)
+
+    # Veins
+    for _ in range(12):
+        points = []
+        start_x = rng.randint(0, TEXTURE_SIZE)
+        start_y = rng.randint(0, TEXTURE_SIZE)
+        length = rng.randint(3, 6)
+        points.append((start_x, start_y))
+        for _ in range(length):
+            start_x += rng.randint(-8, 8)
+            start_y += rng.randint(-8, 8)
+            points.append((start_x, start_y))
+        vein_color = (
+            max(0, min(255, base_color[0] + 30)),
+            max(0, min(255, base_color[1] - 30)),
+            max(0, min(255, base_color[2] - 40)),
+        )
+        pygame.draw.lines(surf, vein_color, False, points, 3)
+
+    return surf
+
+
+def generate_wall_textures() -> dict[str, pygame.Surface]:
+    flesh_palettes = {
+        "1": (170, 120, 110),
+        "2": (150, 100, 90),
+        "3": (180, 80, 80),
+        "4": (140, 60, 80),
+        "5": (200, 140, 120),
+    }
+    textures: dict[str, pygame.Surface] = {}
+    for tile, color in flesh_palettes.items():
+        textures[tile] = make_flesh_texture(color).convert()
+    return textures
+
+
 def is_blocking(x: float, y: float) -> bool:
     if x < 0 or y < 0 or x >= MAP_WIDTH or y >= MAP_HEIGHT:
         return True
@@ -271,12 +333,14 @@ def apply_teleport(player: Player) -> None:
         if len(destinations) < 2:
             return
         current = (tile_x, tile_y)
-        for dest in destinations:
-            if dest != current:
-                player.x = dest[0] + 0.5
-                player.y = dest[1] + 0.5
-                player.last_teleport = tile
-                return
+        valid_targets = [dest for dest in destinations if dest != current]
+        if not valid_targets:
+            player.last_teleport = tile
+            return
+        dest_x, dest_y = valid_targets[0]
+        player.x = dest_x + 0.5
+        player.y = dest_y + 0.5
+        player.last_teleport = tile
     else:
         player.last_teleport = None
 
@@ -457,7 +521,7 @@ def render_column(screen: pygame.Surface, column: int, draw_start: int, draw_end
     pygame.draw.line(screen, color, (column, draw_start), (column, draw_end))
 
 
-def cast_rays(screen: pygame.Surface, player: Player) -> list[float]:
+def cast_rays(screen: pygame.Surface, player: Player, textures: dict[str, pygame.Surface]) -> list[float]:
     depth_buffer = [float("inf")] * SCREEN_WIDTH
     for column in range(SCREEN_WIDTH):
         camera_x = 2 * column / SCREEN_WIDTH - 1
@@ -522,10 +586,34 @@ def cast_rays(screen: pygame.Surface, player: Player) -> list[float]:
         draw_start = max(-line_height // 2 + SCREEN_HEIGHT // 2, 0)
         draw_end = min(line_height // 2 + SCREEN_HEIGHT // 2, SCREEN_HEIGHT - 1)
 
-        base_color = WALL_COLORS.get(tile, (180, 180, 180))
-        if side == 1:
-            base_color = tuple(int(c * 0.65) for c in base_color)
-        render_column(screen, column, draw_start, draw_end, base_color)
+        texture = textures.get(tile)
+        if texture is not None:
+            tex_width = texture.get_width()
+            tex_height = texture.get_height()
+            if side == 0:
+                wall_x = player.y + perp_wall_dist * ray_dir_y
+            else:
+                wall_x = player.x + perp_wall_dist * ray_dir_x
+            wall_x -= math.floor(wall_x)
+            tex_x = int(wall_x * tex_width)
+            if side == 0 and ray_dir_x > 0:
+                tex_x = tex_width - tex_x - 1
+            if side == 1 and ray_dir_y < 0:
+                tex_x = tex_width - tex_x - 1
+            tex_x = max(0, min(tex_width - 1, tex_x))
+            column_surface = texture.subsurface(pygame.Rect(tex_x, 0, 1, tex_height))
+            column_surface = pygame.transform.smoothscale(column_surface, (1, line_height))
+            if side == 1:
+                shaded = column_surface.copy()
+                shaded.fill((150, 150, 150), special_flags=pygame.BLEND_RGB_MULT)
+                screen.blit(shaded, (column, draw_start))
+            else:
+                screen.blit(column_surface, (column, draw_start))
+        else:
+            base_color = WALL_COLORS.get(tile, (180, 180, 180))
+            if side == 1:
+                base_color = tuple(int(c * 0.65) for c in base_color)
+            render_column(screen, column, draw_start, draw_end, base_color)
         depth_buffer[column] = perp_wall_dist
 
     return depth_buffer
@@ -684,18 +772,36 @@ def draw_danger_overlay(screen: pygame.Surface, distance: float) -> None:
     screen.blit(overlay, (0, 0))
 
 
+def draw_stamina_bar(screen: pygame.Surface, ratio: float, recharging: bool, font: pygame.font.Font) -> None:
+    ratio = max(0.0, min(1.0, ratio))
+    bar_width = 220
+    bar_height = 16
+    x = 20
+    y = SCREEN_HEIGHT - 60
+    pygame.draw.rect(screen, (30, 30, 40), pygame.Rect(x - 2, y - 2, bar_width + 4, bar_height + 4), border_radius=6)
+    pygame.draw.rect(screen, (70, 70, 90), pygame.Rect(x, y, bar_width, bar_height), border_radius=6)
+    fill_width = int(bar_width * ratio)
+    if fill_width > 0:
+        color = (200, 240, 140) if not recharging else (250, 180, 120)
+        pygame.draw.rect(screen, color, pygame.Rect(x, y, fill_width, bar_height), border_radius=6)
+    label = font.render("Stamina", True, (220, 220, 220))
+    screen.blit(label, (x, y - 18))
+
+
 def main() -> None:
     pygame.init()
     pygame.display.set_caption("Labyrinth Raycaster")
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("Menlo", 16)
+    small_font = pygame.font.SysFont("Menlo", 14)
     monster_frames = load_monster_frames()
     pellet_sprite = load_pellet_sprite()
     teleporter_sprites = {
         symbol: make_teleporter_sprite(color)
         for symbol, color in TELEPORT_COLORS.items()
     }
+    wall_textures = generate_wall_textures()
 
     def reset_state() -> tuple[Player, list[Monster], list[Pellet], int, int, bool, bool]:
         player_obj = spawn_player()
@@ -708,6 +814,9 @@ def main() -> None:
 
     player, monsters, pellets, collected_count, win_target, alive, won = reset_state()
     total_pellets = len(pellets)
+    stamina_time_left = RUN_DURATION
+    stamina_cooldown = 0.0
+    stamina_recharging = False
 
     running = True
     while running:
@@ -717,18 +826,36 @@ def main() -> None:
                 running = False
 
         keys = pygame.key.get_pressed()
+        shift_pressed = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+
+        if stamina_recharging and stamina_cooldown > 0:
+            stamina_cooldown = max(0.0, stamina_cooldown - delta_time)
+            if stamina_cooldown == 0:
+                stamina_time_left = RUN_DURATION
+                stamina_recharging = False
+
         if alive and not won:
             move_speed = 3.0 * delta_time
             rot_speed = 1.8 * delta_time
 
+            run_active = False
+            if shift_pressed and not stamina_recharging and stamina_time_left > 0:
+                run_active = True
+                stamina_time_left = max(0.0, stamina_time_left - delta_time)
+                if stamina_time_left == 0:
+                    stamina_recharging = True
+                    stamina_cooldown = RUN_COOLDOWN
+
+            effective_speed = move_speed * (RUN_SPEED_MULT if run_active else 1.0)
+
             if keys[pygame.K_w]:
-                move_player(player, player.dir_x * move_speed, player.dir_y * move_speed)
+                move_player(player, player.dir_x * effective_speed, player.dir_y * effective_speed)
             if keys[pygame.K_s]:
-                move_player(player, -player.dir_x * move_speed, -player.dir_y * move_speed)
+                move_player(player, -player.dir_x * effective_speed, -player.dir_y * effective_speed)
             if keys[pygame.K_q]:
-                move_player(player, -player.plane_x * move_speed, -player.plane_y * move_speed)
+                move_player(player, -player.plane_x * effective_speed, -player.plane_y * effective_speed)
             if keys[pygame.K_e]:
-                move_player(player, player.plane_x * move_speed, player.plane_y * move_speed)
+                move_player(player, player.plane_x * effective_speed, player.plane_y * effective_speed)
             if keys[pygame.K_a]:
                 rotate_player(player, rot_speed)
             if keys[pygame.K_d]:
@@ -745,24 +872,29 @@ def main() -> None:
             if keys[pygame.K_r]:
                 player, monsters, pellets, collected_count, win_target, alive, won = reset_state()
                 total_pellets = len(pellets)
+                stamina_time_left = RUN_DURATION
+                stamina_cooldown = 0.0
+                stamina_recharging = False
 
         danger_distance = nearest_monster_distance(player, monsters)
 
         screen.fill(CEILING_COLOR)
         pygame.draw.rect(screen, FLOOR_COLOR, pygame.Rect(0, SCREEN_HEIGHT // 2, SCREEN_WIDTH, SCREEN_HEIGHT // 2))
 
-        depth_buffer = cast_rays(screen, player)
+        depth_buffer = cast_rays(screen, player, wall_textures)
         draw_collectibles(screen, player, pellets, depth_buffer, pellet_sprite)
         draw_teleporters(screen, player, depth_buffer, teleporter_sprites)
         draw_monsters(screen, player, monsters, depth_buffer, monster_frames)
         draw_minimap(screen, player, monsters, pellets)
         if alive and not won:
             draw_danger_overlay(screen, danger_distance)
+        draw_stamina_bar(screen, stamina_time_left / RUN_DURATION, stamina_recharging, small_font)
 
         info_lines = [
             "W/S: forward/back",
             "Q/E: strafe",
             "A/D: rotate",
+            "Shift: sprint",
             "R: respawn",
             f"Spheres: {collected_count}/{total_pellets} (need {win_target})",
             f"FPS: {clock.get_fps():5.1f}",
